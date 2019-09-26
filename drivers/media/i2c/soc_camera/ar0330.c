@@ -33,7 +33,7 @@
 #include <media/v4l2-subdev.h>
 #include <media/v4l2-ctrls.h>
 #include <media/soc_camera.h>
-#include <mach/io_dpd.h>
+// #include <mach/io_dpd.h> Deep power down. Probably TK1 specific?
 
 struct ar0330_reg {
 	u16 addr;
@@ -662,11 +662,11 @@ static int ar0330_mclk_enable(struct ar0330_info *info)
 	return err;
 }
 
-static struct tegra_io_dpd csia_io = {
-	.name			= "CSIA",
-	.io_dpd_reg_index	= 0,
-	.io_dpd_bit		= 0,
-};
+// static struct tegra_io_dpd csia_io = {
+// 	.name			= "CSIA",
+// 	.io_dpd_reg_index	= 0,
+// 	.io_dpd_bit		= 0,
+// };
 
 #define CAM1_PWDN 221 /* TEGRA_GPIO_PBB5 */
 
@@ -678,7 +678,7 @@ static int ar0330_power_on(struct ar0330_power_rail *pw)
 		return -EFAULT;
 
 	/* disable CSIA IOs DPD mode to turn on front camera for ardbeg */
-	tegra_io_dpd_disable(&csia_io);
+	// tegra_io_dpd_disable(&csia_io);
 
 	gpio_set_value(CAM1_PWDN, 0);
 
@@ -701,7 +701,7 @@ ar0261_avdd_fail:
 
 ar0261_iovdd_fail:
 	/* put CSIA IOs into DPD mode to save additional power for ardbeg */
-	tegra_io_dpd_enable(&csia_io);
+	// tegra_io_dpd_enable(&csia_io);
 	pr_info("%s: failed!\n", __func__);
 
 	return -ENODEV;
@@ -713,7 +713,7 @@ static int ar0330_power_off(struct ar0330_power_rail *pw)
 		/* put CSIA IOs into DPD mode to
 		 * save additional power for ardbeg
 		 */
-		tegra_io_dpd_enable(&csia_io);
+		// tegra_io_dpd_enable(&csia_io);
 		return -EFAULT;
 	}
 
@@ -724,7 +724,7 @@ static int ar0330_power_off(struct ar0330_power_rail *pw)
 	regulator_disable(pw->iovdd);
 	regulator_disable(pw->avdd);
 	/* put CSIA IOs into DPD mode to save additional power for ardbeg */
-	tegra_io_dpd_enable(&csia_io);
+	// tegra_io_dpd_enable(&csia_io);
 	return 0;
 }
 
