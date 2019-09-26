@@ -884,13 +884,15 @@ static int ar0330_cropcap(struct v4l2_subdev *sd, struct v4l2_cropcap *a)
 	return 0;
 }
 
-static int ar0330_enum_fmt(struct v4l2_subdev *sd, unsigned int index,
-			   enum v4l2_mbus_pixelcode *code)
+static int ar0330_enum_mbus_code(struct v4l2_subdev *sd,
+		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_mbus_code_enum *code)
 {
-	if ((unsigned int)index >= ARRAY_SIZE(ar0330_colour_fmts))
+	if (code->pad ||
+	    (unsigned int)code->index >= ARRAY_SIZE(ar0330_colour_fmts))
 		return -EINVAL;
 
-	*code = ar0330_colour_fmts[index].code;
+	code->code = ar0330_colour_fmts[code->index].code;
 	return 0;
 }
 
@@ -943,7 +945,6 @@ static int ar0330_g_mbus_config(struct v4l2_subdev *sd,
 
 static struct v4l2_subdev_video_ops ar0330_subdev_video_ops = {
 	.s_stream	= ar0330_s_stream,
-	.enum_mbus_fmt	= ar0330_enum_fmt,
 	.g_crop		= ar0330_g_crop,
 	.cropcap	= ar0330_cropcap,
 	.g_mbus_config	= ar0330_g_mbus_config,
@@ -954,6 +955,7 @@ static struct v4l2_subdev_core_ops ar0330_subdev_core_ops = {
 };
 
 static const struct v4l2_subdev_pad_ops ar0330_subdev_pad_ops = {
+	.enum_mbus_code = ar0330_enum_mbus_code,
 	.get_fmt	= ar0330_get_fmt,
 	.set_fmt	= ar0330_set_fmt,
 };
