@@ -1,7 +1,7 @@
 /*
  * ar0330.c - ar0330 sensor driver
  *
- * Copyright (c) 2014 - 2015, NVIDIA CORPORATION, All Rights Reserved.
+ * Copyright (c) 2015, NVIDIA Corporation. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -20,57 +20,78 @@
 #include <linux/fs.h>
 #include <linux/i2c.h>
 #include <linux/clk.h>
-#include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/regulator/consumer.h>
 #include <linux/regmap.h>
-#include <media/ar0330.h>
 #include <linux/gpio.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 
-#include <linux/kernel.h>
-#include <linux/seq_file.h>
-#include <linux/of.h>
-#include <linux/of_device.h>
-#include <linux/of_gpio.h>
+#include <media/v4l2-device.h>
+#include <linux/v4l2-mediabus.h>
+#include <media/ar0330.h>
+#include <media/v4l2-subdev.h>
+#include <media/v4l2-ctrls.h>
+#include <media/soc_camera.h>
+// #include <mach/io_dpd.h> Deep power down. Probably TK1 specific?
 
-#include "nvc_utilities.h"
-sdfjl
 struct ar0330_reg {
 	u16 addr;
 	u16 val;
 };
 
-struct ar0330_info {
-	struct miscdevice		miscdev_info;
-	int				mode;
-	struct ar0330_power_rail	power;
-	struct ar0330_sensordata	sensor_data;
-	struct i2c_client		*i2c_client;
-	struct ar0330_platform_data	*pdata;
-	struct clk			*mclk;
-	struct regmap			*regmap;
-	struct mutex			ar0330_camera_lock;
-	atomic_t			in_use;
-	char devname[16];
+struct ar0330_datafmt {
+	enum v4l2_mbus_pixelcode	code;
+	enum v4l2_colorspace		colorspace;
 };
+
+struct ar0330_info {
+	struct v4l2_subdev		subdev;
+	const struct ar0330_datafmt	*fmt;
+
+	struct ar0330_power_rail power;
+	struct ar0330_sensordata sensor_data;
+	struct i2c_client *i2c_client;
+	struct clk *mclk;
+	struct regmap *regmap;
+	int mode;
+};
+
+static const struct ar0330_datafmt ar0330_colour_fmts[] = {
+	{V4L2_MBUS_FMT_SRGGB10_1X10, V4L2_COLORSPACE_SRGB},
+	{V4L2_MBUS_FMT_SRGGB8_1X8, V4L2_COLORSPACE_SRGB},
+};
+
+static struct ar0330_info *to_ar0330(const struct i2c_client *client)
+{
+	return container_of(i2c_get_clientdata(client),
+			    struct ar0330_info, subdev);
+}
+
+/* Find a data format by a pixel code in an array */
+static const struct ar0330_datafmt *ar0330_find_datafmt(
+		enum v4l2_mbus_pixelcode code)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ar0330_colour_fmts); i++)
+		if (ar0330_colour_fmts[i].code == code)
+			return ar0330_colour_fmts + i;
+
+	return NULL;
+}
+
+
+#define AR0330_TABLE_WAIT_MS 0
+#define AR0330_TABLE_END 1
+#define AR0330_WAIT_MS 100
 
 static const struct regmap_config sensor_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 16,
 	.cache_type = REGCACHE_RBTREE,
 };
-
-#define AR0330_TABLE_WAIT_MS 0
-#define AR0330_TABLE_END 1
-#define AR0330_MAX_RETRIES 3
-#define AR0330_WAIT_MS 100
-
-#define MAX_BUFFER_SIZE 32
-#define AR0330_FRAME_LENGTH_ADDR 0x300A
-#define AR0330_COARSE_TIME_ADDR 0x3012
-#define AR0330_GAIN_ADDR 0x3060
 
 static struct ar0330_reg mode_2304x1536[] = {
 	{0x3052, 0xa114},
@@ -116,337 +137,57 @@ static struct ar0330_reg mode_2304x1536[] = {
 	{0x305E, 0x00A0},
 	{0x3088, 0x80BA},
 	{0x3086, 0x0253},
-	{0x30CE, 0x0010},
-	{0x301A, 0x035C},
+	/* {0x30CE, 0x0010}, */
+	{0x301A, 0x025C},
 	{AR0330_TABLE_END, 0x00}
 };
 
 static struct ar0330_reg mode_1280x720[] = {
-	{0x301A, 0x0059},
-	{AR0330_TABLE_WAIT_MS, AR0330_WAIT_MS},
-	{0x31AE, 0x0204},
-	{0x301A, 0x0059},
+	{0x3052, 0xa114},
+	{0x304A, 0x0070},
 	{AR0330_TABLE_WAIT_MS, AR0330_WAIT_MS},
 	{0x301A, 0x0058},
+	{0x302A, 0x0005},
+	{0x302C, 0x0004},
+	{0x302E, 0x0003},
+	{0x3030, 0x005F},
+	{0x3036, 0x000A},
+	{0x3038, 0x0001},
+	{0x31AC, 0x0A0A},
+	{0x31AE, 0x0201},
+	{0x31B0, 0x003D},
+	{0x31B2, 0x0018},
+	{0x31B4, 0x4F56},
+	{0x31B6, 0x4214},
+	{0x31B8, 0x308B},
+	{0x31BA, 0x028A},
+	{0x31BC, 0x8008},
+	{0x3002, 0x019E},
+	{0x3004, 0x0206},
+	{0x3006, 0x046D},
+	{0x3008, 0x0705},
+	{0x300A, 0x0449},
+	{0x300C, 0x0482},
+	{0x3012, 0x0448},
+	{0x3014, 0x0000},
+	{0x30A2, 0x0001},
+	{0x30A6, 0x0001},
+	{0x3040, 0x0000},
+	{0x3042, 0x0000},
+	{0x30BA, 0x006C},
+	{0x31E0, 0x0303},
 	{0x3064, 0x1802},
-	{0x3078, 0x0001},
-	{0x30BA, 0x002C},
-	{0x30FE, 0x0080},
-	{0x31E0, 0x0003},
-	{0x3ECE, 0x09FF},
-	{0x3ED0, 0xE4F6},
 	{0x3ED2, 0x0146},
 	{0x3ED4, 0x8F6C},
 	{0x3ED6, 0x66CC},
 	{0x3ED8, 0x8C42},
-	{0x3EDA, 0x889B},
-	{0x3EDC, 0x8863},
-	{0x3EDE, 0xAA04},
-	{0x3EE0, 0x15F0},
-	{0x3EE6, 0x008C},
-	{0x3EE8, 0x2024},
-	{0x3EEA, 0xFF1F},
-	{0x3F06, 0x046A},
-	{0x3046, 0x4038},
-	{0x3048, 0x8480},
-	{0x31E0, 0x0003},
-	{0x301A, 0x0058},
-	{0x31AE, 0x0201},
-	{0x31AC, 0x0A0A},
-	{0x31B0, 0x0028},
-	{0x31B2, 0x000E},
-	{0x31B4, 0x2743},
-	{0x31B6, 0x114E},
-	{0x31B8, 0x2049},
-	{0x31BA, 0x0186},
-	{0x31BC, 0x8005},
-	{0x31BE, 0x2003},
-	{0x302A, 0x0005},
-	{0x302C, 0x0004},
-	{0x302E, 0x0004},
-	{0x3030, 0x0052},
-	{0x3036, 0x000A},
-	{0x3038, 0x0001},
-	{0x31AC, 0x0A0A},
-	{0x3004, 0x0200},
-	{0x3008, 0x06FF},
-	{0x3002, 0x019C},
-	{0x3006, 0x046B},
-	{0x30A2, 0x0001},
-	{0x30A6, 0x0001},
-	{0x3040, 0x0000},
-	{0x300C, 0x03F6},
-	{0x300A, 0x0328},
-	{0x3014, 0x0000},
-	{0x3012, 0x0327},
-	{0x3042, 0x02B0},
-	{0x30BA, 0x002C},
-	{0x301A, 0x0058},
-	{AR0330_TABLE_WAIT_MS, AR0330_WAIT_MS},
-	{0x3088, 0x8000},
-	{0x3086, 0x4A03},
-	{0x3086, 0x4316},
-	{0x3086, 0x0443},
-	{0x3086, 0x1645},
-	{0x3086, 0x4045},
-	{0x3086, 0x6017},
-	{0x3086, 0x2045},
-	{0x3086, 0x404B},
-	{0x3086, 0x1244},
-	{0x3086, 0x6134},
-	{0x3086, 0x4A31},
-	{0x3086, 0x4342},
-	{0x3086, 0x4560},
-	{0x3086, 0x2714},
-	{0x3086, 0x3DFF},
-	{0x3086, 0x3DFF},
-	{0x3086, 0x3DEA},
-	{0x3086, 0x2704},
-	{0x3086, 0x3D10},
-	{0x3086, 0x2705},
-	{0x3086, 0x3D10},
-	{0x3086, 0x2715},
-	{0x3086, 0x3527},
-	{0x3086, 0x053D},
-	{0x3086, 0x1045},
-	{0x3086, 0x4027},
-	{0x3086, 0x0427},
-	{0x3086, 0x143D},
-	{0x3086, 0xFF3D},
-	{0x3086, 0xFF3D},
-	{0x3086, 0xEA62},
-	{0x3086, 0x2728},
-	{0x3086, 0x3627},
-	{0x3086, 0x083D},
-	{0x3086, 0x6444},
-	{0x3086, 0x2C2C},
-	{0x3086, 0x2C2C},
-	{0x3086, 0x4B01},
-	{0x3086, 0x432D},
-	{0x3086, 0x4643},
-	{0x3086, 0x1647},
-	{0x3086, 0x435F},
-	{0x3086, 0x4F50},
-	{0x3086, 0x2604},
-	{0x3086, 0x2684},
-	{0x3086, 0x2027},
-	{0x3086, 0xFC53},
-	{0x3086, 0x0D5C},
-	{0x3086, 0x0D57},
-	{0x3086, 0x5417},
-	{0x3086, 0x0955},
-	{0x3086, 0x5649},
-	{0x3086, 0x5307},
-	{0x3086, 0x5302},
-	{0x3086, 0x4D28},
-	{0x3086, 0x6C4C},
-	{0x3086, 0x0928},
-	{0x3086, 0x2C28},
-	{0x3086, 0x294E},
-	{0x3086, 0x5C09},
-	{0x3086, 0x6045},
-	{0x3086, 0x0045},
-	{0x3086, 0x8026},
-	{0x3086, 0xA627},
-	{0x3086, 0xF817},
-	{0x3086, 0x0227},
-	{0x3086, 0xFA5C},
-	{0x3086, 0x0B17},
-	{0x3086, 0x1826},
-	{0x3086, 0xA25C},
-	{0x3086, 0x0317},
-	{0x3086, 0x4427},
-	{0x3086, 0xF25F},
-	{0x3086, 0x2809},
-	{0x3086, 0x1714},
-	{0x3086, 0x2808},
-	{0x3086, 0x1701},
-	{0x3086, 0x4D1A},
-	{0x3086, 0x2683},
-	{0x3086, 0x1701},
-	{0x3086, 0x27FA},
-	{0x3086, 0x45A0},
-	{0x3086, 0x1707},
-	{0x3086, 0x27FB},
-	{0x3086, 0x1729},
-	{0x3086, 0x4580},
-	{0x3086, 0x1708},
-	{0x3086, 0x27FA},
-	{0x3086, 0x1728},
-	{0x3086, 0x5D17},
-	{0x3086, 0x0E26},
-	{0x3086, 0x8153},
-	{0x3086, 0x0117},
-	{0x3086, 0xE653},
-	{0x3086, 0x0217},
-	{0x3086, 0x1026},
-	{0x3086, 0x8326},
-	{0x3086, 0x8248},
-	{0x3086, 0x4D4E},
-	{0x3086, 0x2809},
-	{0x3086, 0x4C0B},
-	{0x3086, 0x6017},
-	{0x3086, 0x2027},
-	{0x3086, 0xF217},
-	{0x3086, 0x535F},
-	{0x3086, 0x2808},
-	{0x3086, 0x164D},
-	{0x3086, 0x1A17},
-	{0x3086, 0x0127},
-	{0x3086, 0xFA26},
-	{0x3086, 0x035C},
-	{0x3086, 0x0145},
-	{0x3086, 0x4027},
-	{0x3086, 0x9817},
-	{0x3086, 0x2A4A},
-	{0x3086, 0x0A43},
-	{0x3086, 0x160B},
-	{0x3086, 0x4327},
-	{0x3086, 0x9C45},
-	{0x3086, 0x6017},
-	{0x3086, 0x0727},
-	{0x3086, 0x9D17},
-	{0x3086, 0x2545},
-	{0x3086, 0x4017},
-	{0x3086, 0x0827},
-	{0x3086, 0x985D},
-	{0x3086, 0x2645},
-	{0x3086, 0x4B17},
-	{0x3086, 0x0A28},
-	{0x3086, 0x0853},
-	{0x3086, 0x0D52},
-	{0x3086, 0x5112},
-	{0x3086, 0x4460},
-	{0x3086, 0x184A},
-	{0x3086, 0x0343},
-	{0x3086, 0x1604},
-	{0x3086, 0x4316},
-	{0x3086, 0x5843},
-	{0x3086, 0x1659},
-	{0x3086, 0x4316},
-	{0x3086, 0x5A43},
-	{0x3086, 0x165B},
-	{0x3086, 0x4327},
-	{0x3086, 0x9C45},
-	{0x3086, 0x6017},
-	{0x3086, 0x0727},
-	{0x3086, 0x9D17},
-	{0x3086, 0x2545},
-	{0x3086, 0x4017},
-	{0x3086, 0x1027},
-	{0x3086, 0x9817},
-	{0x3086, 0x2022},
-	{0x3086, 0x4B12},
-	{0x3086, 0x442C},
-	{0x3086, 0x2C2C},
-	{0x3086, 0x2C00},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	{0x3086, 0x0000},
-	/* stream on */
-	{0x301A, 0x0058},
-	{AR0330_TABLE_WAIT_MS, AR0330_WAIT_MS},
+	{0x3EDA, 0x88BC},
+	{0x3EDC, 0xAA63},
+	{0x305E, 0x00A0},
 	{0x3088, 0x80BA},
 	{0x3086, 0x0253},
-	{0x30CE, 0x0010},
-	{0x301A, 0x015C},
+	/* {0x30CE, 0x0010}, */
+	{0x301A, 0x025C},
 	{AR0330_TABLE_END, 0x00}
 };
 
@@ -494,57 +235,8 @@ static struct ar0330_reg mode_1280x960[] = {
 	{0x305E, 0x00A0},
 	{0x3088, 0x80BA},
 	{0x3086, 0x0253},
-	{0x30CE, 0x0010},
-	{0x301A, 0x035C},
-	{AR0330_TABLE_END, 0x00}
-};
-
-static struct ar0330_reg mode_2048x1296[] = {
-	{0x3052, 0xa114},
-	{0x304A, 0x0070},
-	{AR0330_TABLE_WAIT_MS, AR0330_WAIT_MS},
-	{0x301A, 0x0058},
-	{0x302A, 0x0005},
-	{0x302C, 0x0001},
-	{0x302E, 0x0002},
-	{0x3030, 0x0029},
-	{0x3036, 0x000A},
-	{0x3038, 0x0001},
-	{0x31AC, 0x0A0A},
-	{0x31AE, 0x0204},
-	{0x31B0, 0x002F},
-	{0x31B2, 0x0013},
-	{0x31B4, 0x3C44},
-	{0x31B6, 0x314D},
-	{0x31B8, 0x208A},
-	{0x31BA, 0x0207},
-	{0x31BC, 0x8005},
-	{0x3002, 0x007E},
-	{0x3004, 0x0086},
-	{0x3006, 0x058D},
-	{0x3008, 0x0885},
-	{0x300A, 0x05BB},
-	{0x300C, 0x045E},
-	{0x3012, 0x05BA},
-	{0x3014, 0x0000},
-	{0x30A2, 0x0001},
-	{0x30A6, 0x0001},
-	{0x3040, 0x0000},
-	{0x3042, 0x0000},
-	{0x30BA, 0x002C},
-	{0x31E0, 0x0303},
-	{0x3064, 0x1802},
-	{0x3ED2, 0x0146},
-	{0x3ED4, 0x8F6C},
-	{0x3ED6, 0x66CC},
-	{0x3ED8, 0x8C42},
-	{0x3EDA, 0x88BC},
-	{0x3EDC, 0xAA63},
-	{0x305E, 0x00A0},
-	{0x3088, 0x80BA},
-	{0x3086, 0x0253},
-	{0x30CE, 0x0010},
-	{0x301A, 0x035C},
+	/* {0x30CE, 0x0010}, */
+	{0x301A, 0x025C},
 	{AR0330_TABLE_END, 0x00}
 };
 
@@ -552,75 +244,390 @@ enum {
 	AR0330_MODE_2304X1536,
 	AR0330_MODE_1280X720,
 	AR0330_MODE_1280X960,
-	AR0330_MODE_2048X1296,
+};
+
+static struct ar0330_reg tp_colorbar[] = {
+	{0x301A, 0x0019},
+	{AR0330_TABLE_WAIT_MS, 10},
+	{0x301A, 0x0218},
+	{0x31B0, 0x0062},
+	{0x31B2, 0x0046},
+	{0x31B4, 0x3248},
+	{0x31B6, 0x22A6},
+	{0x31B8, 0x1832},
+	{0x31BA, 0x1052},
+	{0x31BC, 0x0408},
+	{0x31AE, 0x0201},
+	{AR0330_TABLE_WAIT_MS, 1},
+	{0x3044, 0x0590},
+	{0x3EE6, 0x60AD},
+	{0x3EDC, 0xDBFA},
+	{0x301A, 0x0218},
+	{AR0330_TABLE_WAIT_MS, 10},
+	{0x3D00, 0x0481},
+	{0x3D02, 0xFFFF},
+	{0x3D04, 0xFFFF},
+	{0x3D06, 0xFFFF},
+	{0x3D08, 0x6600},
+	{0x3D0A, 0x0311},
+	{0x3D0C, 0x8C67},
+	{0x3D0E, 0x0808},
+	{0x3D10, 0x4380},
+	{0x3D12, 0x4343},
+	{0x3D14, 0x8043},
+	{0x3D16, 0x4330},
+	{0x3D18, 0x0543},
+	{0x3D1A, 0x4381},
+	{0x3D1C, 0x4C85},
+	{0x3D1E, 0x2022},
+	{0x3D20, 0x8020},
+	{0x3D22, 0xA093},
+	{0x3D24, 0x5A8A},
+	{0x3D26, 0x4C81},
+	{0x3D28, 0x5981},
+	{0x3D2A, 0x1E00},
+	{0x3D2C, 0x5F83},
+	{0x3D2E, 0x5C80},
+	{0x3D30, 0x5C81},
+	{0x3D32, 0x5F58},
+	{0x3D34, 0x6880},
+	{0x3D36, 0x1060},
+	{0x3D38, 0x8541},
+	{0x3D3A, 0xB350},
+	{0x3D3C, 0x5F10},
+	{0x3D3E, 0x6050},
+	{0x3D40, 0x5780},
+	{0x3D42, 0x6880},
+	{0x3D44, 0x2220},
+	{0x3D46, 0x805D},
+	{0x3D48, 0x8140},
+	{0x3D4A, 0x864B},
+	{0x3D4C, 0x8524},
+	{0x3D4E, 0x08A0},
+	{0x3D50, 0x55B8},
+	{0x3D52, 0x429C},
+	{0x3D54, 0x4281},
+	{0x3D56, 0x4081},
+	{0x3D58, 0x2808},
+	{0x3D5A, 0x2810},
+	{0x3D5C, 0x5727},
+	{0x3D5E, 0x1069},
+	{0x3D60, 0x4B52},
+	{0x3D62, 0x8265},
+	{0x3D64, 0x8A65},
+	{0x3D66, 0xA95E},
+	{0x3D68, 0x5080},
+	{0x3D6A, 0x5250},
+	{0x3D6C, 0x6080},
+	{0x3D6E, 0x6922},
+	{0x3D70, 0x2080},
+	{0x3D72, 0x5D80},
+	{0x3D74, 0x4080},
+	{0x3D76, 0x5681},
+	{0x3D78, 0x5781},
+	{0x3D7A, 0x4B86},
+	{0x3D7C, 0x2408},
+	{0x3D7E, 0x9345},
+	{0x3D80, 0x8144},
+	{0x3D82, 0x4481},
+	{0x3D84, 0x4586},
+	{0x3D86, 0x4E80},
+	{0x3D88, 0x4FCD},
+	{0x3D8A, 0x4685},
+	{0x3D8C, 0x0006},
+	{0x3D8E, 0x8143},
+	{0x3D90, 0x4380},
+	{0x3D92, 0x4343},
+	{0x3D94, 0x8043},
+	{0x3D96, 0x4380},
+	{0x3D98, 0x4343},
+	{0x3D9A, 0x8043},
+	{0x3D9C, 0x4380},
+	{0x3D9E, 0x4343},
+	{0x3DA0, 0x8648},
+	{0x3DA2, 0x4880},
+	{0x3DA4, 0x6B6B},
+	{0x3DA6, 0x814C},
+	{0x3DA8, 0x864D},
+	{0x3DAA, 0xA442},
+	{0x3DAC, 0x8641},
+	{0x3DAE, 0x804D},
+	{0x3DB0, 0x864C},
+	{0x3DB2, 0x8A45},
+	{0x3DB4, 0x8144},
+	{0x3DB6, 0x4481},
+	{0x3DB8, 0x4583},
+	{0x3DBA, 0x46B7},
+	{0x3DBC, 0x7386},
+	{0x3DBE, 0x4685},
+	{0x3DC0, 0x0006},
+	{0x3DC2, 0x8143},
+	{0x3DC4, 0x4380},
+	{0x3DC6, 0x4343},
+	{0x3DC8, 0x8043},
+	{0x3DCA, 0x4380},
+	{0x3DCC, 0x4343},
+	{0x3DCE, 0x8043},
+	{0x3DD0, 0x4380},
+	{0x3DD2, 0x4343},
+	{0x3DD4, 0x8648},
+	{0x3DD6, 0x4880},
+	{0x3DD8, 0x6A6A},
+	{0x3DDA, 0x814C},
+	{0x3DDC, 0x864D},
+	{0x3DDE, 0xA442},
+	{0x3DE0, 0x8641},
+	{0x3DE2, 0x804D},
+	{0x3DE4, 0x864C},
+	{0x3DE6, 0x8A45},
+	{0x3DE8, 0x8144},
+	{0x3DEA, 0x4481},
+	{0x3DEC, 0x4583},
+	{0x3DEE, 0x4686},
+	{0x3DF0, 0x73FF},
+	{0x3DF2, 0xD358},
+	{0x3DF4, 0x835B},
+	{0x3DF6, 0x825A},
+	{0x3DF8, 0x8153},
+	{0x3DFA, 0x5467},
+	{0x3DFC, 0x6363},
+	{0x3DFE, 0x2640},
+	{0x3E00, 0x6470},
+	{0x3E02, 0xFFFF},
+	{0x3E04, 0xFFFF},
+	{0x3E06, 0xFFED},
+	{0x3E08, 0x4580},
+	{0x3E0A, 0x4384},
+	{0x3E0C, 0x4380},
+	{0x3E0E, 0x0280},
+	{0x3E10, 0x8402},
+	{0x3E12, 0x8080},
+	{0x3E14, 0x6A84},
+	{0x3E16, 0x6A80},
+	{0x3E18, 0x4484},
+	{0x3E1A, 0x4480},
+	{0x3E1C, 0x4578},
+	{0x3E1E, 0x8270},
+	{0x3E20, 0x0000},
+	{0x3E22, 0x0000},
+	{0x3E24, 0x0000},
+	{0x3E26, 0x0000},
+	{0x3E28, 0x0000},
+	{0x3E2A, 0x0000},
+	{0x3E2C, 0x0000},
+	{0x3E2E, 0x0000},
+	{0x3E30, 0x0000},
+	{0x3E32, 0x0000},
+	{0x3E34, 0x0000},
+	{0x3E36, 0x0000},
+	{0x3E38, 0x0000},
+	{0x3E3A, 0x0000},
+	{0x3E3C, 0x0000},
+	{0x3E3E, 0x0000},
+	{0x3E40, 0x0000},
+	{0x3E42, 0x0000},
+	{0x3E44, 0x0000},
+	{0x3E46, 0x0000},
+	{0x3E48, 0x0000},
+	{0x3E4A, 0x0000},
+	{0x3E4C, 0x0000},
+	{0x3E4E, 0x0000},
+	{0x3E50, 0x0000},
+	{0x3E52, 0x0000},
+	{0x3E54, 0x0000},
+	{0x3E56, 0x0000},
+	{0x3E58, 0x0000},
+	{0x3E5A, 0x0000},
+	{0x3E5C, 0x0000},
+	{0x3E5E, 0x0000},
+	{0x3E60, 0x0000},
+	{0x3E62, 0x0000},
+	{0x3E64, 0x0000},
+	{0x3E66, 0x0000},
+	{0x3E68, 0x0000},
+	{0x3E6A, 0x0000},
+	{0x3E6C, 0x0000},
+	{0x3E6E, 0x0000},
+	{0x3E70, 0x0000},
+	{0x3E72, 0x0000},
+	{0x3E74, 0x0000},
+	{0x3E76, 0x0000},
+	{0x3E78, 0x0000},
+	{0x3E7A, 0x0000},
+	{0x3E7C, 0x0000},
+	{0x3E7E, 0x0000},
+	{0x3E80, 0x0000},
+	{0x3E82, 0x0000},
+	{0x3E84, 0x0000},
+	{0x3E86, 0x0000},
+	{0x3E88, 0x0000},
+	{0x3E8A, 0x0000},
+	{0x3E8C, 0x0000},
+	{0x3E8E, 0x0000},
+	{0x3E90, 0x0000},
+	{0x3E92, 0x0000},
+	{0x3E94, 0x0000},
+	{0x3E96, 0x0000},
+	{0x3E98, 0x0000},
+	{0x3E9A, 0x0000},
+	{0x3E9C, 0x0000},
+	{0x3E9E, 0x0000},
+	{0x3EA0, 0x0000},
+	{0x3EA2, 0x0000},
+	{0x3EA4, 0x0000},
+	{0x3EA6, 0x0000},
+	{0x3EA8, 0x0000},
+	{0x3EAA, 0x0000},
+	{0x3EAC, 0x0000},
+	{0x3EAE, 0x0000},
+	{0x3EB0, 0x0000},
+	{0x3EB2, 0x0000},
+	{0x3EB4, 0x0000},
+	{0x3EB6, 0x0000},
+	{0x3EB8, 0x0000},
+	{0x3EBA, 0x0000},
+	{0x3EBC, 0x0000},
+	{0x3EBE, 0x0000},
+	{0x3EC0, 0x0000},
+	{0x3EC2, 0x0000},
+	{0x3EC4, 0x0000},
+	{0x3EC6, 0x0000},
+	{0x3EC8, 0x0000},
+	{0x3ECA, 0x0000},
+	{0x301A, 0x021C},
+	{0x0342, 0x10CC},
+	{0x0340, 0x04A4},
+	{0x0202, 0x0496},
+	{0x0312, 0x045D},
+	{0x31AE, 0x0201},
+	{0x0300, 0x0005},
+	{0x0302, 0x0001},
+	{0x0304, 0x0202},
+	{0x0306, 0x4040},
+	{0x0308, 0x000A},
+	{0x030A, 0x0001},
+	{0x0344, 0x0008},
+	{0x0348, 0x0787},
+	{0x0346, 0x0008},
+	{0x034A, 0x043F},
+	{0x034C, 0x0780},
+	{0x034E, 0x0438},
+	{0x3040, 0x0041},
+	{0x0104, 0x0001},
+	{0x3ECC, 0x008F},
+	{0x3ECE, 0xA8F0},
+	{0x3ED0, 0xFFFF},
+	{0x3ED6, 0x7193},
+	{0x3ED8, 0x8A11},
+	{0x30D2, 0x0020},
+	{0x30D4, 0x0040},
+	{0x3180, 0x80FF},
+	{0x0104, 0x0000},
+	{0x3044, 0x0000},
+	{0x30CA, 0x0001},
+	{0x30D4, 0x0000},
+	{0x31E0, 0x0000},
+	{0x301A, 0x0000},
+	{0x301E, 0x0000},
+	{0x3070, 0x0002},
+	{0x301A, 0x001C},
+	{AR0330_TABLE_END, 0x0000}
 };
 
 static struct ar0330_reg *mode_table[] = {
 	[AR0330_MODE_2304X1536] = mode_2304x1536,
 	[AR0330_MODE_1280X720] = mode_1280x720,
 	[AR0330_MODE_1280X960] = mode_1280x960,
-	[AR0330_MODE_2048X1296] = mode_2048x1296,
 };
 
+
+static int test_mode;
+module_param(test_mode, int, 0644);
+
+static const struct v4l2_frmsize_discrete ar0330_frmsizes[] = {
+	{2304, 1536},
+	{1280, 720},
+	{1280, 960},
+};
+
+#define AR0330_MODE	AR0330_MODE_2304X1536
+#define AR0330_WIDTH	2304
+#define AR0330_HEIGHT	1536
+
+static int ar0330_find_mode(u32 width, u32 height)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ar0330_frmsizes); i++) {
+		if (width == ar0330_frmsizes[i].width &&
+		    height == ar0330_frmsizes[i].height) {
+			return i;
+		}
+	}
+
+	pr_err("ar0330: %dx%d is NOT in table\n", width, height);
+	return AR0330_MODE_2304X1536;
+}
 static inline void
 msleep_range(unsigned int delay_base)
 {
 	usleep_range(delay_base*1000, delay_base*1000+500);
 }
 
-static inline void
-ar0330_get_frame_length_regs(struct ar0330_reg *regs, u32 frame_length)
-{
-	regs->addr = AR0330_FRAME_LENGTH_ADDR;
-	regs->val = frame_length & 0xffff;
-}
-
-static inline void
-ar0330_get_coarse_time_regs(struct ar0330_reg *regs, u32 coarse_time)
-{
-	regs->addr = AR0330_COARSE_TIME_ADDR;
-	regs->val = coarse_time & 0xffff;
-}
-
-static inline void
-ar0330_get_gain_reg(struct ar0330_reg *regs, u16 gain)
-{
-	regs->addr = AR0330_GAIN_ADDR;
-	regs->val = gain;
-}
-
-static inline int
-ar0330_read_reg(struct ar0330_info *info, u16 addr, u16 *val)
-{
-	return regmap_read(info->regmap, addr, (unsigned int *) val);
-}
-
-static int
-ar0330_write_reg(struct ar0330_info *info, u16 addr, u16 val)
+static int ar0330_read_reg(struct ar0330_info *info, u16 addr, u16 *val)
 {
 	int err;
+	unsigned char data[2];
 
-	err = regmap_write(info->regmap, addr, val);
-
-	if (err)
-		pr_err("%s:i2c write failed, %x = %x\n",
-			__func__, addr, val);
+	err = regmap_raw_read(info->regmap, addr, data, sizeof(data));
+	if (!err)
+		*val = (u16)data[0] << 8 | data[1];
 
 	return err;
 }
 
-static int
-ar0330_write_table(struct ar0330_info *info,
-				 const struct ar0330_reg table[],
-				 const struct ar0330_reg override_list[],
-				 int num_override_regs)
+static inline int ar0330_read_reg8(struct ar0330_info *info, u16 reg, u8 *val)
 {
 	int err;
+	u32 _val;
+
+	err = regmap_read(info->regmap, reg, &_val);
+	if (!err)
+		*val = _val & 0xFF;
+
+	return err;
+}
+
+static int ar0330_write_reg(struct ar0330_info *info, u16 addr, u16 val)
+{
+	int err;
+	unsigned char data[2];
+
+	data[0] = (u8) (val >> 8);
+	data[1] = (u8) (val & 0xff);
+	err = regmap_raw_write(info->regmap, addr, data, sizeof(data));
+	if (err)
+		dev_err(&info->i2c_client->dev,
+			"%s:i2c write failed, %x = %x\n", __func__, addr, val);
+
+	return err;
+}
+
+static inline int ar0330_write_reg8(struct ar0330_info *info, u16 reg, u8 val)
+{
+	return regmap_write(info->regmap, reg, val);
+}
+
+static int
+ar0330_write_table(struct ar0330_info *info,
+			 const struct ar0330_reg table[])
+{
 	const struct ar0330_reg *next;
-	int i;
+	int err = 0;
 	u16 val;
 
 	for (next = table; next->addr != AR0330_TABLE_END; next++) {
+
 		if (next->addr == AR0330_TABLE_WAIT_MS) {
 			msleep_range(next->val);
 			continue;
@@ -628,206 +635,12 @@ ar0330_write_table(struct ar0330_info *info,
 
 		val = next->val;
 
-		/* When an override list is passed in, replace the reg */
-		/* value to write if the reg is in the list            */
-		if (override_list) {
-			for (i = 0; i < num_override_regs; i++) {
-				if (next->addr == override_list[i].addr) {
-					val = override_list[i].val;
-					break;
-				}
-			}
-		}
-
 		err = ar0330_write_reg(info, next->addr, val);
-		if (err) {
-			pr_err("%s:ar0330_write_table:%d", __func__, err);
-			return err;
-		}
-	}
-	return 0;
-}
-
-static int ar0330_get_flash_cap(struct ar0330_info *info)
-{
-	struct ar0330_flash_control *fctl;
-
-	dev_dbg(&info->i2c_client->dev, "%s: %p\n", __func__, info->pdata);
-	if (info->pdata) {
-		fctl = &info->pdata->flash_cap;
-		dev_dbg(&info->i2c_client->dev,
-			"edg: %x, st: %x, rpt: %x, dl: %x\n",
-			fctl->edge_trig_en,
-			fctl->start_edge,
-			fctl->repeat,
-			fctl->delay_frm);
-
-		if (fctl->enable)
-			return 0;
-	}
-	return -ENODEV;
-}
-
-static inline int ar0330_set_flash_control(
-	struct ar0330_info *info, struct ar0330_flash_control *fc)
-{
-	dev_dbg(&info->i2c_client->dev, "%s\n", __func__);
-	return 0;
-}
-
-static int
-ar0330_set_mode(struct ar0330_info *info, struct ar0330_mode *mode)
-{
-	int sensor_mode;
-	int err;
-	struct ar0330_reg reg_list[8];
-
-	pr_info("%s: xres %u yres %u framelength %u coarsetime %u gain %u\n",
-			 __func__, mode->xres, mode->yres, mode->frame_length,
-			 mode->coarse_time, mode->gain);
-
-	if (mode->xres == 2304 && mode->yres == 1520) {
-		sensor_mode = AR0330_MODE_2304X1536;
-	} else if (mode->xres == 1280 && mode->yres == 720) {
-		sensor_mode = AR0330_MODE_1280X720;
-	} else if (mode->xres == 1280 && mode->yres == 960) {
-		sensor_mode = AR0330_MODE_1280X960;
-	} else if (mode->xres == 2048 && mode->yres == 1296) {
-		sensor_mode = AR0330_MODE_2048X1296;
-	} else {
-		pr_err("%s: invalid resolution supplied to set mode %d %d\n",
-			 __func__, mode->xres, mode->yres);
-		return -EINVAL;
+		if (err)
+			break;
 	}
 
-	/* get a list of override regs for the asking frame length, */
-	/* coarse integration time, and gain.                       */
-	ar0330_get_frame_length_regs(reg_list, mode->frame_length);
-	ar0330_get_coarse_time_regs(reg_list + 1, mode->coarse_time);
-	ar0330_get_gain_reg(reg_list + 2, mode->gain);
-
-	err = ar0330_write_table(info,
-				mode_table[sensor_mode],
-				reg_list, 3);
-	if (err)
-		return err;
-	info->mode = sensor_mode;
-	pr_info("[AR0330]: stream on.\n");
-	return 0;
-}
-
-static int
-ar0330_get_status(struct ar0330_info *info, u8 *dev_status)
-{
-	*dev_status = 0;
-	return 0;
-}
-
-static int
-ar0330_set_frame_length(struct ar0330_info *info, u32 frame_length,
-						 bool group_hold)
-{
-	struct ar0330_reg reg_list[2];
-	int i = 0;
-	int ret;
-
-	ar0330_get_frame_length_regs(reg_list, frame_length);
-
-	for (i = 0; i < 1; i++) {
-		ret = ar0330_write_reg(info, reg_list[i].addr,
-			 reg_list[i].val);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
-}
-
-static int
-ar0330_set_coarse_time(struct ar0330_info *info, u32 coarse_time,
-						 bool group_hold)
-{
-	int ret;
-
-	struct ar0330_reg reg_list[2];
-	int i = 0;
-
-	ar0330_get_coarse_time_regs(reg_list, coarse_time);
-
-	for (i = 0; i < 1; i++) {
-		ret = ar0330_write_reg(info, reg_list[i].addr,
-			 reg_list[i].val);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
-}
-
-static int
-ar0330_set_gain(struct ar0330_info *info, u16 gain, bool group_hold)
-{
-	int ret;
-	struct ar0330_reg reg_list;
-
-	ar0330_get_gain_reg(&reg_list, gain);
-
-	ret = ar0330_write_reg(info, reg_list.addr, reg_list.val);
-	if (ret)
-		return ret;
-
-	return 0;
-}
-
-static int
-ar0330_set_group_hold(struct ar0330_info *info, struct ar0330_ae *ae)
-{
-	int count = 0;
-	bool group_hold_enabled = false;
-
-	if (ae->gain_enable)
-		count++;
-	if (ae->coarse_time_enable)
-		count++;
-	if (ae->frame_length_enable)
-		count++;
-	if (count >= 2)
-		group_hold_enabled = true;
-
-	if (ae->gain_enable)
-		ar0330_set_gain(info, ae->gain, false);
-	if (ae->coarse_time_enable)
-		ar0330_set_coarse_time(info, ae->coarse_time, false);
-	if (ae->frame_length_enable)
-		ar0330_set_frame_length(info, ae->frame_length, false);
-
-	return 0;
-}
-
-static int ar0330_get_sensor_id(struct ar0330_info *info)
-{
-	int ret = 0;
-
-	pr_info("%s\n", __func__);
-	if (info->sensor_data.fuse_id_size)
-		return 0;
-
-	/* Note 1: If the sensor does not have power at this point
-	Need to supply the power, e.g. by calling power on function */
-
-	/*ret |= ar0330_write_reg(info, 0x3B02, 0x00);
-	ret |= ar0330_write_reg(info, 0x3B00, 0x01);
-	for (i = 0; i < 9; i++) {
-		ret |= ar0330_read_reg(info, 0x3B24 + i, &bak);
-		info->sensor_data.fuse_id[i] = bak;
-	}
-
-	if (!ret)
-		info->sensor_data.fuse_id_size = i;*/
-
-	/* Note 2: Need to clean up any action carried out in Note 1 */
-
-	return ret;
+	return err;
 }
 
 static void ar0330_mclk_disable(struct ar0330_info *info)
@@ -842,7 +655,7 @@ static int ar0330_mclk_enable(struct ar0330_info *info)
 	unsigned long mclk_init_rate = 24000000;
 
 	dev_dbg(&info->i2c_client->dev, "%s: enable MCLK with %lu Hz\n",
-		__func__, mclk_init_rate);
+			__func__, mclk_init_rate);
 
 	err = clk_set_rate(info->mclk, mclk_init_rate);
 	if (!err)
@@ -850,204 +663,104 @@ static int ar0330_mclk_enable(struct ar0330_info *info)
 	return err;
 }
 
-static long
-ar0330_ioctl(struct file *file,
-			 unsigned int cmd, unsigned long arg)
-{
-	int err = 0;
-	struct ar0330_info *info = file->private_data;
+// static struct tegra_io_dpd csia_io = {
+// 	.name			= "CSIA",
+// 	.io_dpd_reg_index	= 0,
+// 	.io_dpd_bit		= 0,
+// };
 
-	switch (cmd) {
-	case AR0330_IOCTL_SET_POWER:
-		if (!info->pdata)
-			break;
-		if (arg && info->pdata->power_on) {
-			err = ar0330_mclk_enable(info);
-			if (!err)
-				err = info->pdata->power_on(&info->power);
-			if (err < 0)
-				ar0330_mclk_disable(info);
-		}
-		if (!arg && info->pdata->power_off) {
-			info->pdata->power_off(&info->power);
-			ar0330_mclk_disable(info);
-		}
-		break;
-	case AR0330_IOCTL_SET_MODE:
-	{
-		struct ar0330_mode mode;
-		if (copy_from_user(&mode, (const void __user *)arg,
-			sizeof(struct ar0330_mode))) {
-			pr_err("%s:Failed to get mode from user.\n", __func__);
-			return -EFAULT;
-		}
-		return ar0330_set_mode(info, &mode);
-	}
-	case AR0330_IOCTL_SET_FRAME_LENGTH:
-		return ar0330_set_frame_length(info, (u32)arg, true);
-	case AR0330_IOCTL_SET_COARSE_TIME:
-		return ar0330_set_coarse_time(info, (u32)arg, true);
-	case AR0330_IOCTL_SET_GAIN:
-		return ar0330_set_gain(info, (u16)arg, true);
-	case AR0330_IOCTL_GET_STATUS:
-	{
-		u8 status;
-
-		err = ar0330_get_status(info, &status);
-		if (err)
-			return err;
-		if (copy_to_user((void __user *)arg, &status, 1)) {
-			pr_err("%s:Failed to copy status to user\n", __func__);
-			return -EFAULT;
-		}
-		return 0;
-	}
-	case AR0330_IOCTL_GET_SENSORDATA:
-	{
-		err = ar0330_get_sensor_id(info);
-
-		if (err) {
-			pr_err("%s:Failed to get fuse id info.\n", __func__);
-			return err;
-		}
-		if (copy_to_user((void __user *)arg, &info->sensor_data,
-				sizeof(struct ar0330_sensordata))) {
-			pr_info("%s:Failed to copy fuse id to user space\n",
-				__func__);
-			return -EFAULT;
-		}
-		return 0;
-	}
-	case AR0330_IOCTL_SET_GROUP_HOLD:
-	{
-		struct ar0330_ae ae;
-		if (copy_from_user(&ae, (const void __user *)arg,
-			sizeof(struct ar0330_ae))) {
-			pr_info("%s:fail group hold\n", __func__);
-			return -EFAULT;
-		}
-		return ar0330_set_group_hold(info, &ae);
-	}
-	case AR0330_IOCTL_SET_FLASH_MODE:
-	{
-		struct ar0330_flash_control values;
-
-		dev_dbg(&info->i2c_client->dev,
-			"AR0330_IOCTL_SET_FLASH_MODE\n");
-		if (copy_from_user(&values,
-			(const void __user *)arg,
-			sizeof(struct ar0330_flash_control))) {
-			err = -EFAULT;
-			break;
-		}
-		err = ar0330_set_flash_control(info, &values);
-		break;
-	}
-	case AR0330_IOCTL_GET_FLASH_CAP:
-		err = ar0330_get_flash_cap(info);
-		break;
-	default:
-		pr_err("%s:unknown cmd.\n", __func__);
-		err = -EINVAL;
-	}
-
-	return err;
-}
+#define CAM1_PWDN 221 /* TEGRA_GPIO_PBB5 */
 
 static int ar0330_power_on(struct ar0330_power_rail *pw)
 {
 	int err;
-	struct ar0330_info *info = container_of(pw, struct ar0330_info, power);
 
-	if (unlikely(WARN_ON(!pw || !pw->iovdd || !pw->avdd || !pw->dvdd)))
+	if (unlikely(WARN_ON(!pw || !pw->avdd || !pw->iovdd)))
 		return -EFAULT;
 
-	gpio_set_value(info->pdata->cam2_gpio, 0);
-	usleep_range(10, 20);
+	/* disable CSIA IOs DPD mode to turn on front camera for ardbeg */
+	// tegra_io_dpd_disable(&csia_io);
 
-	err = regulator_enable(pw->avdd);
-	if (err)
-		goto ar0330_avdd_fail;
-
-	err = regulator_enable(pw->dvdd);
-	if (err)
-		goto ar0330_dvdd_fail;
+	gpio_set_value(CAM1_PWDN, 0);
 
 	err = regulator_enable(pw->iovdd);
-	if (err)
-		goto ar0330_iovdd_fail;
+	if (unlikely(err))
+		goto ar0261_iovdd_fail;
+
+	usleep_range(1000, 1100);
+	err = regulator_enable(pw->avdd);
+	if (unlikely(err))
+		goto ar0261_avdd_fail;
 
 	usleep_range(1, 2);
-	gpio_set_value(info->pdata->cam2_gpio, 1);
+	gpio_set_value(CAM1_PWDN, 1);
 
-	usleep_range(300, 310);
+	return 0;
 
-	return 1;
+ar0261_avdd_fail:
+	regulator_disable(pw->iovdd);
 
+ar0261_iovdd_fail:
+	/* put CSIA IOs into DPD mode to save additional power for ardbeg */
+	// tegra_io_dpd_enable(&csia_io);
+	pr_info("%s: failed!\n", __func__);
 
-ar0330_iovdd_fail:
-	regulator_disable(pw->dvdd);
-
-ar0330_dvdd_fail:
-	regulator_disable(pw->avdd);
-
-ar0330_avdd_fail:
-	pr_err("%s failed.\n", __func__);
 	return -ENODEV;
 }
 
 static int ar0330_power_off(struct ar0330_power_rail *pw)
 {
-	struct ar0330_info *info = container_of(pw, struct ar0330_info, power);
-
-	if (unlikely(WARN_ON(!pw || !pw->iovdd || !pw->avdd || !pw->dvdd)))
+	if (unlikely(WARN_ON(!pw || !pw->avdd || !pw->iovdd))) {
+		/* put CSIA IOs into DPD mode to
+		 * save additional power for ardbeg
+		 */
+		// tegra_io_dpd_enable(&csia_io);
 		return -EFAULT;
+	}
 
-	usleep_range(1, 2);
-	gpio_set_value(info->pdata->cam2_gpio, 0);
+	gpio_set_value(CAM1_PWDN, 0);
+
 	usleep_range(1, 2);
 
 	regulator_disable(pw->iovdd);
-	regulator_disable(pw->dvdd);
 	regulator_disable(pw->avdd);
-
+	/* put CSIA IOs into DPD mode to save additional power for ardbeg */
+	// tegra_io_dpd_enable(&csia_io);
 	return 0;
 }
 
-static int
-ar0330_open(struct inode *inode, struct file *file)
-{
-	struct miscdevice	*miscdev = file->private_data;
-	struct ar0330_info *info;
 
-	info = container_of(miscdev, struct ar0330_info, miscdev_info);
-	/* check if the device is in use */
-	if (atomic_xchg(&info->in_use, 1)) {
-		pr_info("%s:BUSY!\n", __func__);
-		return -EBUSY;
+static int ar0330_get_sensor_id(struct ar0330_info *info)
+{
+	u16 chip_version = 0;
+	int retry_num = 10, ret = 0;
+
+	ar0330_mclk_enable(info);
+	ar0330_power_on(&info->power);
+
+	/*
+	 * We have to poll reading until read out something,
+	 * ignore those I2C failures
+	 */
+	while (!chip_version && --retry_num > 0)
+		ar0330_read_reg(info, 0x3000, &chip_version);
+
+	pr_info("[ar0330]: chip version 0x%04x\n", chip_version);
+	if (chip_version != 0x2604) {
+		pr_err("[ar0330]: failed to read sensor id\n");
+		ret = -ENODEV;
 	}
 
-	file->private_data = info;
+	ar0330_mclk_disable(info);
+	ar0330_power_off(&info->power);
 
-	return 0;
-}
-
-static int
-ar0330_release(struct inode *inode, struct file *file)
-{
-	struct ar0330_info *info = file->private_data;
-
-	file->private_data = NULL;
-
-	/* warn if device is already released */
-	WARN_ON(!atomic_xchg(&info->in_use, 0));
-	return 0;
+	return ret;
 }
 
 static int ar0330_power_put(struct ar0330_power_rail *pw)
 {
-	if (unlikely(!pw))
-		return -EFAULT;
+	if (likely(pw->dvdd))
+		regulator_put(pw->dvdd);
 
 	if (likely(pw->avdd))
 		regulator_put(pw->avdd);
@@ -1055,12 +768,9 @@ static int ar0330_power_put(struct ar0330_power_rail *pw)
 	if (likely(pw->iovdd))
 		regulator_put(pw->iovdd);
 
-	if (likely(pw->dvdd))
-		regulator_put(pw->dvdd);
-
+	pw->dvdd = NULL;
 	pw->avdd = NULL;
 	pw->iovdd = NULL;
-	pw->dvdd = NULL;
 
 	return 0;
 }
@@ -1088,80 +798,192 @@ static int ar0330_regulator_get(struct ar0330_info *info,
 static int ar0330_power_get(struct ar0330_info *info)
 {
 	struct ar0330_power_rail *pw = &info->power;
-	int err = 0;
 
-	err |= ar0330_regulator_get(info, &pw->avdd, "vana"); /* ananlog 2.7v */
-	err |= ar0330_regulator_get(info, &pw->dvdd, "vdig"); /* digital 1.2v */
-	err |= ar0330_regulator_get(info, &pw->iovdd, "vif"); /* IO 1.8v */
+	ar0330_regulator_get(info, &pw->dvdd, "vdig"); /* digital 1.2v */
+	ar0330_regulator_get(info, &pw->avdd, "vana"); /* analog 2.7v */
+	ar0330_regulator_get(info, &pw->iovdd, "vif"); /* interface 1.8v */
 
-	return err;
+	return 0;
 }
 
-static const struct file_operations ar0330_fileops = {
-	.owner = THIS_MODULE,
-	.open = ar0330_open,
-	.unlocked_ioctl = ar0330_ioctl,
-	.release = ar0330_release,
-};
-
-static struct miscdevice ar0330_device = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name = "ar0330",
-	.fops = &ar0330_fileops,
-};
-
-static struct of_device_id ar0330_of_match[] = {
-	{ .compatible = "nvidia,ar0330", },
-	{ },
-};
-
-MODULE_DEVICE_TABLE(of, ar0330_of_match);
-
-static struct ar0330_platform_data *ar0330_parse_dt(struct i2c_client *client)
+static int ar0330_try_fmt(struct v4l2_subdev *sd,
+			  struct v4l2_mbus_framefmt *mf)
 {
-	struct device_node *np = client->dev.of_node;
-	struct ar0330_platform_data *board_info_pdata;
-	const struct of_device_id *match;
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct ar0330_info *info = to_ar0330(client);
+	int mode = ar0330_find_mode(mf->width, mf->height);
 
-	match = of_match_device(ar0330_of_match, &client->dev);
-	if (!match) {
-		dev_err(&client->dev, "Failed to find matching dt id\n");
-		return NULL;
-	}
+	mf->width = ar0330_frmsizes[mode].width;
+	mf->height = ar0330_frmsizes[mode].height;
 
-	board_info_pdata = devm_kzalloc(&client->dev, sizeof(*board_info_pdata),
-			GFP_KERNEL);
-	if (!board_info_pdata) {
-		dev_err(&client->dev, "Failed to allocate pdata\n");
-		return NULL;
-	}
+	if (mf->code != V4L2_MBUS_FMT_SRGGB8_1X8 &&
+	    mf->code != V4L2_MBUS_FMT_SRGGB10_1X10)
+		mf->code = V4L2_MBUS_FMT_SRGGB10_1X10;
 
-	board_info_pdata->cam2_gpio = of_get_named_gpio(np, "cam1-gpios", 0);
-	board_info_pdata->ext_reg = of_property_read_bool(np, "nvidia,ext_reg");
+	mf->field = V4L2_FIELD_NONE;
+	mf->colorspace = V4L2_COLORSPACE_SRGB;
 
-	board_info_pdata->power_on = ar0330_power_on;
-	board_info_pdata->power_off = ar0330_power_off;
+	info->mode = mode;
 
-	return board_info_pdata;
+	return 0;
 }
+
+static int ar0330_s_fmt(struct v4l2_subdev *sd,
+			struct v4l2_mbus_framefmt *mf)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct ar0330_info *info = to_ar0330(client);
+
+	dev_dbg(sd->v4l2_dev->dev, "%s(%u)\n", __func__, mf->code);
+
+	/* MIPI CSI could have changed the format, double-check */
+	if (!ar0330_find_datafmt(mf->code))
+		return -EINVAL;
+
+	ar0330_try_fmt(sd, mf);
+
+	info->fmt = ar0330_find_datafmt(mf->code);
+
+	return 0;
+}
+
+static int ar0330_g_fmt(struct v4l2_subdev *sd,
+			struct v4l2_mbus_framefmt *mf)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct ar0330_info *info = to_ar0330(client);
+
+	const struct ar0330_datafmt *fmt = info->fmt;
+
+	mf->code	= fmt->code;
+	mf->colorspace	= fmt->colorspace;
+	mf->width	= AR0330_WIDTH;
+	mf->height	= AR0330_HEIGHT;
+	mf->field	= V4L2_FIELD_NONE;
+
+	return 0;
+}
+
+static int ar0330_g_crop(struct v4l2_subdev *sd, struct v4l2_crop *a)
+{
+	struct v4l2_rect *rect = &a->c;
+
+	a->type		= V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	rect->top	= 0;
+	rect->left	= 0;
+	rect->width	= AR0330_WIDTH;
+	rect->height	= AR0330_HEIGHT;
+
+	return 0;
+}
+
+static int ar0330_cropcap(struct v4l2_subdev *sd, struct v4l2_cropcap *a)
+{
+	a->bounds.left			= 0;
+	a->bounds.top			= 0;
+	a->bounds.width			= AR0330_WIDTH;
+	a->bounds.height		= AR0330_HEIGHT;
+	a->defrect			= a->bounds;
+	a->type				= V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	a->pixelaspect.numerator	= 1;
+	a->pixelaspect.denominator	= 1;
+
+	return 0;
+}
+
+static int ar0330_enum_fmt(struct v4l2_subdev *sd, unsigned int index,
+			   enum v4l2_mbus_pixelcode *code)
+{
+	if ((unsigned int)index >= ARRAY_SIZE(ar0330_colour_fmts))
+		return -EINVAL;
+
+	*code = ar0330_colour_fmts[index].code;
+	return 0;
+}
+
+static int ar0330_s_stream(struct v4l2_subdev *sd, int enable)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct ar0330_info *info = to_ar0330(client);
+
+	if (!enable)
+		return 0;
+
+	if (test_mode)
+		return ar0330_write_table(info, tp_colorbar);
+
+	return ar0330_write_table(info, mode_table[info->mode]);
+}
+
+
+static int ar0330_s_power(struct v4l2_subdev *sd, int on)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(sd);
+	struct ar0330_info *info = to_ar0330(client);
+	int err;
+
+	if (on) {
+		err = ar0330_mclk_enable(info);
+		if (!err)
+			err = ar0330_power_on(&info->power);
+		if (err < 0)
+			ar0330_mclk_disable(info);
+		return err;
+	} else if (!on) {
+		ar0330_power_off(&info->power);
+		ar0330_mclk_disable(info);
+		return 0;
+	} else
+		return -EINVAL;
+}
+
+static int ar0330_g_mbus_config(struct v4l2_subdev *sd,
+				struct v4l2_mbus_config *cfg)
+{
+	cfg->type = V4L2_MBUS_CSI2;
+	cfg->flags = V4L2_MBUS_CSI2_1_LANE |
+		V4L2_MBUS_CSI2_CHANNEL_0 |
+		V4L2_MBUS_CSI2_NONCONTINUOUS_CLOCK;
+
+	return 0;
+}
+
+static struct v4l2_subdev_video_ops ar0330_subdev_video_ops = {
+	.s_stream	= ar0330_s_stream,
+	.s_mbus_fmt	= ar0330_s_fmt,
+	.g_mbus_fmt	= ar0330_g_fmt,
+	.try_mbus_fmt	= ar0330_try_fmt,
+	.enum_mbus_fmt	= ar0330_enum_fmt,
+	.g_crop		= ar0330_g_crop,
+	.cropcap	= ar0330_cropcap,
+	.g_mbus_config	= ar0330_g_mbus_config,
+};
+
+static struct v4l2_subdev_core_ops ar0330_subdev_core_ops = {
+	.s_power	= ar0330_s_power,
+};
+
+static struct v4l2_subdev_ops ar0330_subdev_ops = {
+	.core	= &ar0330_subdev_core_ops,
+	.video	= &ar0330_subdev_video_ops,
+};
+
 
 static int
 ar0330_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
 	struct ar0330_info *info;
-	int err;
-	const char *mclk_name;
+	int ret;
 
-	pr_err("[AR0330]: probing sensor.\n");
+	pr_info("[ar0330]: probing sensor.\n");
 
 	info = devm_kzalloc(&client->dev,
-			sizeof(struct ar0330_info), GFP_KERNEL);
+		sizeof(struct ar0330_info), GFP_KERNEL);
 	if (!info) {
-		pr_err("%s:Unable to allocate memory!\n", __func__);
+		pr_err("[ar0330]:%s:Unable to allocate memory!\n", __func__);
 		return -ENOMEM;
 	}
-
 	info->regmap = devm_regmap_init_i2c(client, &sensor_regmap_config);
 	if (IS_ERR(info->regmap)) {
 		dev_err(&client->dev,
@@ -1169,77 +991,50 @@ ar0330_probe(struct i2c_client *client,
 		return -ENODEV;
 	}
 
-	if (client->dev.of_node)
-		info->pdata = ar0330_parse_dt(client);
-	else
-		info->pdata = client->dev.platform_data;
-
-	if (!info->pdata) {
-		pr_err("[AR0330]:%s:Unable to get platform data\n", __func__);
-		return -EFAULT;
-	}
-
 	info->i2c_client = client;
-	atomic_set(&info->in_use, 0);
-	info->mode = -1;
+	info->mode = 0;
+	info->fmt = &ar0330_colour_fmts[0];
 
-	mclk_name = info->pdata->mclk_name ?
-		    info->pdata->mclk_name : "default_mclk";
-	info->mclk = devm_clk_get(&client->dev, mclk_name);
+	info->mclk = devm_clk_get(&client->dev, "mclk2");
 	if (IS_ERR(info->mclk)) {
-		dev_err(&client->dev, "%s: unable to get clock %s\n",
-			__func__, mclk_name);
+		dev_err(&client->dev, "%s: unable to get clock mclk2\n",
+			__func__);
 		return PTR_ERR(info->mclk);
-	}
-
-	if (info->pdata->dev_name != NULL)
-		strncpy(info->devname, info->pdata->dev_name,
-			sizeof(info->devname) - 1);
-	else
-		strncpy(info->devname, "ar0330", sizeof(info->devname) - 1);
-
-	ar0330_power_get(info);
-
-	memcpy(&info->miscdev_info,
-		&ar0330_device,
-		sizeof(struct miscdevice));
-
-	info->miscdev_info.name = info->devname;
-
-	err = misc_register(&info->miscdev_info);
-	if (err) {
-		pr_err("%s:Unable to register misc device!\n", __func__);
-		goto ar0330_probe_fail;
 	}
 
 	i2c_set_clientdata(client, info);
 
-	mutex_init(&info->ar0330_camera_lock);
-	pr_err("[AR0330]: end of probing sensor.\n");
+	ar0330_power_get(info);
+	ret = ar0330_get_sensor_id(info);
+	if (ret < 0) {
+		pr_err("[ar0330]: fail to read out sensor ID.\n");
+		return ret;
+	}
+
+	v4l2_i2c_subdev_init(&info->subdev, client, &ar0330_subdev_ops);
+
+	pr_info("[ar0330]: probing sensor is done.\n");
+
 	return 0;
-
-ar0330_probe_fail:
-	ar0330_power_put(&info->power);
-
-	return err;
 }
 
 static int
 ar0330_remove(struct i2c_client *client)
 {
+	struct soc_camera_subdev_desc *ssdd;
 	struct ar0330_info *info;
+
+	ssdd = soc_camera_i2c_to_desc(client);
+	if (ssdd->free_bus)
+		ssdd->free_bus(ssdd);
+
 	info = i2c_get_clientdata(client);
-	misc_deregister(&ar0330_device);
-	mutex_destroy(&info->ar0330_camera_lock);
-
 	ar0330_power_put(&info->power);
-
 	return 0;
 }
 
 static const struct i2c_device_id ar0330_id[] = {
-	{ "ar0330", 0 },
-	{ "ar0330.1", 0 },
+	{ "ar0330_v4l2", 0 },
 	{ }
 };
 
@@ -1247,7 +1042,7 @@ MODULE_DEVICE_TABLE(i2c, ar0330_id);
 
 static struct i2c_driver ar0330_i2c_driver = {
 	.driver = {
-		.name = "ar0330",
+		.name = "ar0330_v4l2",
 		.owner = THIS_MODULE,
 	},
 	.probe = ar0330_probe,
@@ -1255,16 +1050,22 @@ static struct i2c_driver ar0330_i2c_driver = {
 	.id_table = ar0330_id,
 };
 
-static int __init ar0330_init(void)
+static int __init
+ar0330_init(void)
 {
-	pr_info("[AR0330] sensor driver loading\n");
+	pr_info("[ar0330]: sensor driver loading\n");
 	return i2c_add_driver(&ar0330_i2c_driver);
 }
 
-static void __exit ar0330_exit(void)
+static void __exit
+ar0330_exit(void)
 {
 	i2c_del_driver(&ar0330_i2c_driver);
 }
 
 module_init(ar0330_init);
 module_exit(ar0330_exit);
+
+MODULE_DESCRIPTION("SoC Camera driver for Aptina AR0330");
+MODULE_AUTHOR("Bryan Wu <pengw@nvidia.com>");
+MODULE_LICENSE("GPL v2");
