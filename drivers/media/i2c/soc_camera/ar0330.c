@@ -805,50 +805,44 @@ static int ar0330_power_get(struct ar0330_info *info)
 	return 0;
 }
 
-static int ar0330_try_fmt(struct v4l2_subdev *sd,
-			  struct v4l2_mbus_framefmt *mf)
+static int ar0330_set_fmt(struct v4l2_subdev *sd,
+			struct v4l2_subdev_pad_config *cfg,
+			struct v4l2_subdev_format *format)
 {
+	struct v4l2_mbus_framefmt *mf = &format->format;
+	const struct ar0330_datafmt *fmt = ar0330_find_datafmt(mf->code);
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct ar0330_info *info = to_ar0330(client);
 	int mode = ar0330_find_mode(mf->width, mf->height);
+
+	dev_dbg(sd->v4l2_dev->dev, "%s(%u)\n", __func__, mf->code);
+
+	/* MIPI CSI could have changed the format, double-check */
+	if (!fmt || format->pad)
+		return -EINVAL;
+
+	info->fmt = fmt;
+
+	info->mode = mode;
 
 	mf->width = ar0330_frmsizes[mode].width;
 	mf->height = ar0330_frmsizes[mode].height;
 
 	if (mf->code != V4L2_MBUS_FMT_SRGGB8_1X8 &&
-	    mf->code != V4L2_MBUS_FMT_SRGGB10_1X10)
+		mf->code != V4L2_MBUS_FMT_SRGGB10_1X10)
 		mf->code = V4L2_MBUS_FMT_SRGGB10_1X10;
 
 	mf->field = V4L2_FIELD_NONE;
 	mf->colorspace = V4L2_COLORSPACE_SRGB;
 
-	info->mode = mode;
-
 	return 0;
 }
 
-static int ar0330_s_fmt(struct v4l2_subdev *sd,
-			struct v4l2_mbus_framefmt *mf)
+static int ar0330_get_fmt(struct v4l2_subdev *sd,
+			struct v4l2_subdev_pad_config *cfg,
+			struct v4l2_subdev_format *format)
 {
-	struct i2c_client *client = v4l2_get_subdevdata(sd);
-	struct ar0330_info *info = to_ar0330(client);
-
-	dev_dbg(sd->v4l2_dev->dev, "%s(%u)\n", __func__, mf->code);
-
-	/* MIPI CSI could have changed the format, double-check */
-	if (!ar0330_find_datafmt(mf->code))
-		return -EINVAL;
-
-	ar0330_try_fmt(sd, mf);
-
-	info->fmt = ar0330_find_datafmt(mf->code);
-
-	return 0;
-}
-
-static int ar0330_g_fmt(struct v4l2_subdev *sd,
-			struct v4l2_mbus_framefmt *mf)
-{
+	struct v4l2_mbus_framefmt *mf = &format->format;
 	struct i2c_client *client = v4l2_get_subdevdata(sd);
 	struct ar0330_info *info = to_ar0330(client);
 
@@ -949,9 +943,6 @@ static int ar0330_g_mbus_config(struct v4l2_subdev *sd,
 
 static struct v4l2_subdev_video_ops ar0330_subdev_video_ops = {
 	.s_stream	= ar0330_s_stream,
-	.s_mbus_fmt	= ar0330_s_fmt,
-	.g_mbus_fmt	= ar0330_g_fmt,
-	.try_mbus_fmt	= ar0330_try_fmt,
 	.enum_mbus_fmt	= ar0330_enum_fmt,
 	.g_crop		= ar0330_g_crop,
 	.cropcap	= ar0330_cropcap,
@@ -962,9 +953,15 @@ static struct v4l2_subdev_core_ops ar0330_subdev_core_ops = {
 	.s_power	= ar0330_s_power,
 };
 
+static const struct v4l2_subdev_pad_ops ar0330_subdev_pad_ops = {
+	.get_fmt	= ar0330_get_fmt,
+	.set_fmt	= ar0330_set_fmt,
+};
+
 static struct v4l2_subdev_ops ar0330_subdev_ops = {
 	.core	= &ar0330_subdev_core_ops,
 	.video	= &ar0330_subdev_video_ops,
+	.pad	= &ar0330_subdev_pad_ops,
 };
 
 
