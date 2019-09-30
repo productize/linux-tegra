@@ -668,7 +668,8 @@ static int ar0330_mclk_enable(struct ar0330_info *info)
 // 	.io_dpd_bit		= 0,
 // };
 
-#define CAM1_PWDN 221 /* TEGRA_GPIO_PBB5 */
+// TODO: use I/O expander to control power pin
+// #define CAM1_PWDN 221 /* TEGRA_GPIO_PBB5 */
 
 static int ar0330_power_on(struct ar0330_power_rail *pw)
 {
@@ -680,7 +681,7 @@ static int ar0330_power_on(struct ar0330_power_rail *pw)
 	/* disable CSIA IOs DPD mode to turn on front camera for ardbeg */
 	// tegra_io_dpd_disable(&csia_io);
 
-	gpio_set_value(CAM1_PWDN, 0);
+	// gpio_set_value(CAM1_PWDN, 0);
 
 	err = regulator_enable(pw->iovdd);
 	if (unlikely(err))
@@ -692,7 +693,7 @@ static int ar0330_power_on(struct ar0330_power_rail *pw)
 		goto ar0261_avdd_fail;
 
 	usleep_range(1, 2);
-	gpio_set_value(CAM1_PWDN, 1);
+	// gpio_set_value(CAM1_PWDN, 1);
 
 	return 0;
 
@@ -717,7 +718,7 @@ static int ar0330_power_off(struct ar0330_power_rail *pw)
 		return -EFAULT;
 	}
 
-	gpio_set_value(CAM1_PWDN, 0);
+	// gpio_set_value(CAM1_PWDN, 0);
 
 	usleep_range(1, 2);
 
@@ -993,9 +994,9 @@ ar0330_probe(struct i2c_client *client,
 	info->mode = 0;
 	info->fmt = &ar0330_colour_fmts[0];
 
-	info->mclk = devm_clk_get(&client->dev, "mclk2");
+	info->mclk = devm_clk_get(&client->dev, "mclk");
 	if (IS_ERR(info->mclk)) {
-		dev_err(&client->dev, "%s: unable to get clock mclk2\n",
+		dev_err(&client->dev, "%s: unable to get clock mclk\n",
 			__func__);
 		return PTR_ERR(info->mclk);
 	}
@@ -1032,7 +1033,7 @@ ar0330_remove(struct i2c_client *client)
 }
 
 static const struct i2c_device_id ar0330_id[] = {
-	{ "ar0330_v4l2", 0 },
+	{ "ar0330", 0 },
 	{ }
 };
 
@@ -1040,7 +1041,7 @@ MODULE_DEVICE_TABLE(i2c, ar0330_id);
 
 static struct i2c_driver ar0330_i2c_driver = {
 	.driver = {
-		.name = "ar0330_v4l2",
+		.name = "ar0330",
 		.owner = THIS_MODULE,
 	},
 	.probe = ar0330_probe,
@@ -1051,8 +1052,13 @@ static struct i2c_driver ar0330_i2c_driver = {
 static int __init
 ar0330_init(void)
 {
+	int rv;
 	pr_info("[ar0330]: sensor driver loading\n");
-	return i2c_add_driver(&ar0330_i2c_driver);
+	rv = i2c_add_driver(&ar0330_i2c_driver);
+	if (rv!= 0) {
+		pr_err("[ar0330]: adding i2c driver failed\n");
+	}
+	return rv;
 }
 
 static void __exit
