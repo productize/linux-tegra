@@ -994,9 +994,9 @@ ar0330_probe(struct i2c_client *client,
 	info->mode = 0;
 	info->fmt = &ar0330_colour_fmts[0];
 
-	info->mclk = devm_clk_get(&client->dev, "mclk");
+	info->mclk = devm_clk_get(&client->dev, "extperiph1");
 	if (IS_ERR(info->mclk)) {
-		dev_err(&client->dev, "%s: unable to get clock mclk\n",
+		dev_err(&client->dev, "%s: unable to get clock extperiph1\n",
 			__func__);
 		return PTR_ERR(info->mclk);
 	}
